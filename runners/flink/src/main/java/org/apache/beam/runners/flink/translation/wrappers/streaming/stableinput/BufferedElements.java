@@ -40,6 +40,15 @@ import org.joda.time.Instant;
 })
 class BufferedElements {
 
+  static long getOutputTimestamp(BufferedElement bufferedElement) {
+    if (bufferedElement instanceof Element) {
+      return ((Element) bufferedElement).element.getTimestamp().getMillis();
+    } else if (bufferedElement instanceof Timer) {
+      return ((Timer) bufferedElement).outputTimestamp.getMillis();
+    }
+    throw new IllegalArgumentException("Unknown buffered element type " + bufferedElement);
+  }
+
   static final class Element implements BufferedElement {
     private final WindowedValue element;
 

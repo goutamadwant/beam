@@ -21,7 +21,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
@@ -31,7 +33,9 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.runtime.state.OperatorStateBackend;
+import org.joda.time.Instant;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -148,21 +152,91 @@ public class BufferingDoFnRunnerTest {
         });
   }
 
+  @Test
+  public void testRestoreTimestampHoldsFromOperatorState() throws Exception {
+    Map<String, List<BufferedElement>> bufferedElements = new HashMap<>();
+    bufferedElements.put(
+        "stable-input0",
+        Collections.singletonList(
+            new BufferedElements.Element(
+                WindowedValues.timestampedValueInGlobalWindow("element", new Instant(30)))));
+
+    BufferingDoFnRunner bufferingDoFnRunner =
+        createBufferingDoFnRunner(
+            1,
+            Collections.singletonList(new BufferingDoFnRunner.CheckpointIdentifier(0, 42)),
+            ImmutableList.of(
+                new BufferingDoFnRunner.BufferedElementTimestampHold(0, 10),
+                new BufferingDoFnRunner.BufferedElementTimestampHold(0, 20),
+                new BufferingDoFnRunner.BufferedElementTimestampHold(1, Long.MAX_VALUE)),
+            bufferedElements);
+
+    assertThat(bufferingDoFnRunner.getOutputWatermarkHold(), is(10L));
+  }
+
+  @Test
+  public void testRestoreTimestampHoldsFromBuffersForOldSnapshot() throws Exception {
+    Map<String, List<BufferedElement>> bufferedElements = new HashMap<>();
+    bufferedElements.put(
+        "stable-input0",
+        Collections.singletonList(
+            new BufferedElements.Element(
+                WindowedValues.timestampedValueInGlobalWindow("element", new Instant(10)))));
+
+    BufferingDoFnRunner bufferingDoFnRunner =
+        createBufferingDoFnRunner(
+            1,
+            Collections.singletonList(new BufferingDoFnRunner.CheckpointIdentifier(0, 42)),
+            Collections.emptyList(),
+            bufferedElements);
+
+    assertThat(bufferingDoFnRunner.getOutputWatermarkHold(), is(10L));
+  }
+
   private static BufferingDoFnRunner createBufferingDoFnRunner(
       int concurrentCheckpoints,
       List<BufferingDoFnRunner.CheckpointIdentifier> notYetAcknowledgeCheckpoints)
+      throws Exception {
+    return createBufferingDoFnRunner(
+        concurrentCheckpoints,
+        notYetAcknowledgeCheckpoints,
+        Collections.emptyList(),
+        Collections.emptyMap());
+  }
+
+  private static BufferingDoFnRunner createBufferingDoFnRunner(
+      int concurrentCheckpoints,
+      List<BufferingDoFnRunner.CheckpointIdentifier> notYetAcknowledgeCheckpoints,
+      List<BufferingDoFnRunner.BufferedElementTimestampHold> timestampHolds,
+      Map<String, List<BufferedElement>> bufferedElements)
       throws Exception {
     DoFnRunner doFnRunner = Mockito.mock(DoFnRunner.class);
     OperatorStateBackend operatorStateBackend = Mockito.mock(OperatorStateBackend.class);
 
     // Setup not yet acknowledged checkpoint union list state
-    ListState unionListState = Mockito.mock(ListState.class);
-    Mockito.when(operatorStateBackend.getUnionListState(Mockito.any())).thenReturn(unionListState);
-    Mockito.when(unionListState.get()).thenReturn(notYetAcknowledgeCheckpoints);
+    ListState checkpointListState = Mockito.mock(ListState.class);
+    ListState timestampHoldListState = Mockito.mock(ListState.class);
+    Mockito.when(operatorStateBackend.getUnionListState(Mockito.any()))
+        .thenAnswer(
+            invocation ->
+                ((ListStateDescriptor) invocation.getArgument(0))
+                        .getName()
+                        .equals("notYetAcknowledgedSnapshots")
+                    ? checkpointListState
+                    : timestampHoldListState);
+    Mockito.when(checkpointListState.get()).thenReturn(notYetAcknowledgeCheckpoints);
+    Mockito.when(timestampHoldListState.get()).thenReturn(timestampHolds);
 
     // Setup buffer list state
     Mockito.when(operatorStateBackend.getListState(Mockito.any()))
-        .thenReturn(Mockito.mock(ListState.class));
+        .thenAnswer(
+            invocation -> {
+              String stateName = ((ListStateDescriptor) invocation.getArgument(0)).getName();
+              ListState bufferListState = Mockito.mock(ListState.class);
+              Mockito.when(bufferListState.get())
+                  .thenReturn(bufferedElements.getOrDefault(stateName, Collections.emptyList()));
+              return bufferListState;
+            });
 
     return BufferingDoFnRunner.create(
         doFnRunner,

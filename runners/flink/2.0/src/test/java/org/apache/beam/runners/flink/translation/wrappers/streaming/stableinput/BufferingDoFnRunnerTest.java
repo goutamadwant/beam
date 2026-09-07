@@ -157,14 +157,23 @@ public class BufferingDoFnRunnerTest {
     OperatorStateBackend operatorStateBackend = Mockito.mock(OperatorStateBackend.class);
 
     // Setup not yet acknowledged checkpoint union list state
-    ListState unionListState = Mockito.mock(ListState.class);
+    ListState checkpointListState = Mockito.mock(ListState.class);
+    ListState timestampHoldListState = Mockito.mock(ListState.class);
     Mockito.when(operatorStateBackend.getUnionListState(Mockito.<ListStateDescriptor>any()))
-        .thenReturn(unionListState);
-    Mockito.when(unionListState.get()).thenReturn(notYetAcknowledgeCheckpoints);
+        .thenAnswer(
+            invocation ->
+                ((ListStateDescriptor) invocation.getArgument(0)).getName()
+                        .equals("notYetAcknowledgedSnapshots")
+                    ? checkpointListState
+                    : timestampHoldListState);
+    Mockito.when(checkpointListState.get()).thenReturn(notYetAcknowledgeCheckpoints);
+    Mockito.when(timestampHoldListState.get()).thenReturn(Collections.emptyList());
 
     // Setup buffer list state
+    ListState bufferListState = Mockito.mock(ListState.class);
+    Mockito.when(bufferListState.get()).thenReturn(Collections.emptyList());
     Mockito.when(operatorStateBackend.getListState(Mockito.<ListStateDescriptor>any()))
-        .thenReturn(Mockito.mock(ListState.class));
+        .thenReturn(bufferListState);
 
     return BufferingDoFnRunner.create(
         doFnRunner,

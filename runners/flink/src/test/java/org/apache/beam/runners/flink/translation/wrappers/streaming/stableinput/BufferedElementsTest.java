@@ -41,6 +41,25 @@ import org.junit.Test;
 public class BufferedElementsTest {
 
   @Test
+  public void testOutputTimestamp() {
+    BufferedElement element =
+        new BufferedElements.Element(
+            WindowedValues.of("test", new Instant(2), GlobalWindow.INSTANCE, PaneInfo.NO_FIRING));
+    BufferedElement timer =
+        new BufferedElements.Timer(
+            "timerId",
+            "timerFamilyId",
+            null,
+            GlobalWindow.INSTANCE,
+            new Instant(3),
+            new Instant(4),
+            TimeDomain.EVENT_TIME);
+
+    assertThat(BufferedElements.getOutputTimestamp(element), Matchers.is(2L));
+    assertThat(BufferedElements.getOutputTimestamp(timer), Matchers.is(4L));
+  }
+
+  @Test
   public void testCoder() throws IOException {
 
     StringUtf8Coder elementCoder = StringUtf8Coder.of();

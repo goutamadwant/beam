@@ -99,6 +99,7 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.typeutils.ValueTypeInfo;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
@@ -2004,6 +2005,95 @@ public class DoFnOperatorTest {
             WindowedValues.valueInGlobalWindow("a"),
             WindowedValues.valueInGlobalWindow("b"),
             WindowedValues.valueInGlobalWindow("finishBundle")));
+  }
+
+  @Test
+  public void testExactlyOnceBufferingRetainsWatermarkHolds() throws Exception {
+    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
+    options.setStreaming(true);
+    options.setMaxBundleSize(1L);
+    options.setCheckpointingInterval(1L);
+    options.setCheckpointingMode("EXACTLY_ONCE");
+    options.setNumConcurrentCheckpoints(2);
+
+    TupleTag<String> outputTag = new TupleTag<>("main-output");
+    FullWindowedValueCoder<String> windowedValueCoder =
+        WindowedValues.getFullCoder(StringUtf8Coder.of(), GlobalWindow.Coder.INSTANCE);
+
+    DoFn<String, String> doFn =
+        new DoFn<String, String>() {
+          @ProcessElement
+          @RequiresStableInput
+          public void processElement(ProcessContext context) {
+            context.output(context.element());
+          }
+        };
+
+    DoFnOperator.MultiOutputOutputManagerFactory<String> outputManagerFactory =
+        new DoFnOperator.MultiOutputOutputManagerFactory<>(
+            outputTag, windowedValueCoder, new SerializablePipelineOptions(options));
+
+    Supplier<DoFnOperator<String, String, String>> doFnOperatorSupplier =
+        () ->
+            new DoFnOperator<>(
+                doFn,
+                "stepName",
+                windowedValueCoder,
+                Collections.emptyMap(),
+                outputTag,
+                Collections.emptyList(),
+                outputManagerFactory,
+                WindowingStrategy.globalDefault(),
+                new HashMap<>(), /* side-input mapping */
+                Collections.emptyList(), /* side inputs */
+                options,
+                null,
+                null,
+                DoFnSchemaInformation.create(),
+                Collections.emptyMap());
+
+    DoFnOperator<String, String, String> doFnOperator = doFnOperatorSupplier.get();
+
+    OneInputStreamOperatorTestHarness<WindowedValue<String>, WindowedValue<String>> testHarness =
+        new OneInputStreamOperatorTestHarness<>(doFnOperator);
+    testHarness.open();
+
+    testHarness.processElement(
+        new StreamRecord<>(
+            WindowedValues.timestampedValueInGlobalWindow("before-checkpoint", new Instant(10))));
+    testHarness.snapshot(1L, 0L);
+    testHarness.processElement(
+        new StreamRecord<>(
+            WindowedValues.timestampedValueInGlobalWindow("after-checkpoint", new Instant(20))));
+    testHarness.snapshot(2L, 0L);
+    testHarness.processElement(
+        new StreamRecord<>(
+            WindowedValues.timestampedValueInGlobalWindow("current-buffer", new Instant(30))));
+    testHarness.processWatermark(new Watermark(100));
+
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(10L));
+    doFnOperator.notifyCheckpointComplete(1L);
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(20L));
+    doFnOperator.notifyCheckpointComplete(2L);
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(30L));
+
+    OperatorSubtaskState checkpointThreeState = testHarness.snapshot(3L, 0L);
+    doFnOperator.notifyCheckpointComplete(3L);
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(100L));
+
+    testHarness.close();
+
+    doFnOperator = doFnOperatorSupplier.get();
+    testHarness = new OneInputStreamOperatorTestHarness<>(doFnOperator);
+    testHarness.initializeState(checkpointThreeState);
+    testHarness.open();
+
+    testHarness.processWatermark(new Watermark(100));
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(30L));
+    doFnOperator.notifyCheckpointComplete(3L);
+    assertThat(doFnOperator.getCurrentOutputWatermark(), is(100L));
+
+    testHarness.close();
   }
 
   @Test
